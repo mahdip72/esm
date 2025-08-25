@@ -197,11 +197,24 @@ def main():
 
             # Get the VQ indices for the current protein, up to its original length
             item_vq_indices = vq_indices_batch[i, :current_original_length].cpu().tolist()
-            
+
+            # Get the coordinate validity mask for this protein
+            current_affine_mask = encoder_mask_batch[i, :current_original_length].cpu()
+
+            # Replace VQ indices with MASK tokens where coordinates are invalid
+            # This is CRITICAL: when affine_mask is False, the encoder zeros out embeddings
+            # before VQ quantization, making those VQ indices meaningless
+            processed_vq_indices = []
+            for j, vq_idx in enumerate(item_vq_indices):
+                if current_affine_mask[j]:  # Valid coordinates
+                    processed_vq_indices.append(vq_idx)
+                else:  # Invalid coordinates - use MASK token
+                    processed_vq_indices.append(st_tokenizer.mask_token_id)
+
             # Add BOS and EOS tokens to match official ESM3 format
-            # BOS (4098) at beginning, EOS (4097) at end, as expected by decoder
+            # BOS (4098) at beginning, EOS (4097) at end, MASK (4096) for invalid coords
             # VQ indices are in range [0, 4095], special tokens are [4096, 4100]
-            structure_tokens = [st_tokenizer.bos_token_id] + item_vq_indices + [st_tokenizer.eos_token_id]
+            structure_tokens = [st_tokenizer.bos_token_id] + processed_vq_indices + [st_tokenizer.eos_token_id]
             tokens_str = ",".join(map(str, structure_tokens))
             
             # Length now includes BOS/EOS tokens (original_length + 2)
