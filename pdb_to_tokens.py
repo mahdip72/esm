@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from esm.sdk.api import ESMProtein
 from esm.pretrained import ESM3_structure_encoder_v0
-# from esm.tokenization.structure_tokenizer import StructureTokenizer # Not strictly needed if only saving VQ indices
+from esm.tokenization.structure_tokenizer import StructureTokenizer # Now needed for BOS/EOS tokens
 from pathlib import Path
 from tqdm import tqdm
 import warnings
@@ -134,7 +134,7 @@ def main():
     encoder = ESM3_structure_encoder_v0(device=device)
     encoder = encoder.half() # Convert model to float16
     encoder.eval()
-    # st_tokenizer = StructureTokenizer() # Not needed for VQ indices directly
+    st_tokenizer = StructureTokenizer() # Needed for BOS/EOS tokens
 
     input_path = Path(INPUT_DIR)
     output_csv = Path(OUTPUT_CSV_FILE)
@@ -197,12 +197,20 @@ def main():
 
             # Get the VQ indices for the current protein, up to its original length
             item_vq_indices = vq_indices_batch[i, :current_original_length].cpu().tolist()
-            tokens_str = ",".join(map(str, item_vq_indices))
+            
+            # Add BOS and EOS tokens to match official ESM3 format
+            # BOS (4098) at beginning, EOS (4097) at end, as expected by decoder
+            # VQ indices are in range [0, 4095], special tokens are [4096, 4100]
+            structure_tokens = [st_tokenizer.bos_token_id] + item_vq_indices + [st_tokenizer.eos_token_id]
+            tokens_str = ",".join(map(str, structure_tokens))
+            
+            # Length now includes BOS/EOS tokens (original_length + 2)
+            structure_length = current_original_length + 2
 
             results_list.append({
                 'pdb_name': pdb_name,
                 'discrete_tokens': tokens_str,
-                'length': current_original_length,
+                'length': structure_length, # Updated to include BOS/EOS
                 'sequence': current_sequence, # Add sequence to results
             })
 

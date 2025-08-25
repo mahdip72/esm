@@ -31,7 +31,7 @@ class TokenCSVDataset(Dataset):
                 for row in reader:
                     try:
                         tokens = [int(t) for t in row['discrete_tokens'].split(',')]
-                        protein_length = int(row['length'])
+                        protein_length = int(row['length'])  # This now includes BOS/EOS tokens
 
                         self.data.append({
                             'pdb_name': row['pdb_name'],
@@ -58,35 +58,28 @@ def collate_fn_for_decoding(batch_items, tokenizer): # Removed device argument
         return None
 
     pdb_names = [item['pdb_name'] for item in batch_items]
-    original_lengths = [item['length'] for item in batch_items] # Length of VQ tokens
+    original_lengths = [item['length'] for item in batch_items] # Length including BOS/EOS tokens
 
-    max_len_vq = max(original_lengths) if original_lengths else 0
-    max_struct_token_len = max_len_vq + 2 # For BOS and EOS
+    max_len_struct = max(original_lengths) if original_lengths else 0
 
     struct_tokens_batch_list = []
     decoder_mask_batch_list = []
 
     for item in batch_items:
-        vq_indices = item['tokens']
-        current_len_vq = item['length']
+        structure_tokens = item['tokens']  # These already include BOS/EOS
+        current_len_struct = item['length']
 
-        padded_item_tokens = torch.full((max_struct_token_len,), tokenizer.pad_token_id, dtype=torch.long)
-        if current_len_vq > 0 : # Ensure there are tokens to place
-            padded_item_tokens[0] = tokenizer.bos_token_id
-            padded_item_tokens[1:current_len_vq+1] = torch.tensor(vq_indices, dtype=torch.long)
-            padded_item_tokens[current_len_vq+1] = tokenizer.eos_token_id
-        elif current_len_vq == 0: # Handle zero-length sequences if they make it this far
-             padded_item_tokens[0] = tokenizer.bos_token_id
-             padded_item_tokens[1] = tokenizer.eos_token_id
-
+        # Pad structure tokens (which already include BOS/EOS)
+        padded_item_tokens = torch.full((max_len_struct,), tokenizer.pad_token_id, dtype=torch.long)
+        if current_len_struct > 0: # Ensure there are tokens to place
+            padded_item_tokens[:current_len_struct] = torch.tensor(structure_tokens, dtype=torch.long)
+        # No need to add BOS/EOS manually - they're already in structure_tokens
 
         struct_tokens_batch_list.append(padded_item_tokens)
 
-        item_decoder_mask = torch.zeros(max_struct_token_len, dtype=torch.bool)
-        if current_len_vq > 0:
-            item_decoder_mask[:current_len_vq+2] = True
-        elif current_len_vq == 0: # Mask for BOS and EOS only
-            item_decoder_mask[:2] = True
+        item_decoder_mask = torch.zeros(max_len_struct, dtype=torch.bool)
+        if current_len_struct > 0:
+            item_decoder_mask[:current_len_struct] = True
         decoder_mask_batch_list.append(item_decoder_mask)
 
     if not struct_tokens_batch_list: # If all items had issues or were empty
@@ -163,12 +156,14 @@ def main():
 
         for i in range(len(pdb_names)):
             pdb_name = pdb_names[i]
-            current_vq_length = original_lengths[i]
+            current_struct_length = original_lengths[i]  # This includes BOS/EOS tokens
+            current_vq_length = current_struct_length - 2  # Subtract BOS/EOS to get actual residue count
 
-            if current_vq_length == 0:
-                print(f"Skipping PDB generation for {pdb_name} due to zero length.")
+            if current_struct_length <= 2:  # Only BOS/EOS tokens
+                print(f"Skipping PDB generation for {pdb_name} due to no actual residues (only BOS/EOS).")
                 continue
 
+            # Extract coordinates between BOS and EOS tokens (positions 1 to current_vq_length+1)
             new_coords_bb = bb_pred_batch[i, 1:current_vq_length+1, :, :]
 
             if new_coords_bb.size(0) != current_vq_length:
@@ -178,7 +173,7 @@ def main():
             # Use save_backbone_pdb instead
             try:
                 # Ensure coordinates and mask are on CPU for PDB writing
-                coords_for_pdb = new_coords_bb.cpu()
+                coords_for_pdb = new_coords_bb.cpu() 
                 mask_for_pdb = torch.ones(current_vq_length, device=coords_for_pdb.device, dtype=torch.bool) # Function expects boolean or 0/1
 
                 # Construct the save path prefix.
